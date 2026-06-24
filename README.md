@@ -1,8 +1,8 @@
 # public_curriculum
 
-This repository contains LEVANTE Hackathon 2026 materials (slides, docs, code, etc) for hands-on tutorial sessions only.
+This repository contains LEVANTE Hackathon 2026 materials (slides, docs, code, etc) for hands-on tutorial sessions only. Registered attendes will also receive a link to access these materials on our LEVANTE Hackathon PositCloud space (see https://levante-hackathon-2026.github.io/ for more information).
 
-Materials for talks and panels can be found at https://levante-hackathon-2026.github.io/.
+Materials for talks and panels can be found at https://levante-hackathon-2026.github.io/schedule.
 
 ## Licensing
 
