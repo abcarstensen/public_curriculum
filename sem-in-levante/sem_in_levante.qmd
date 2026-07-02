@@ -1,0 +1,678 @@
+
+# Data preparation
+
+Load the LEVANTE survey data and define site labels used throughout.
+
+```{r}
+# https://github.com/levante-framework/levante-r
+library(levante)
+library(psych)      
+library(patchwork)
+library(tidyverse)
+library(ggthemes)
+
+surveys <- get_surveys(data_source = "levante-data-pilots-hackathon",
+                       version = "current")
+
+# sites present in the data, used in plots and subsetting
+sites    <- surveys |> distinct(team) |> pull(team)
+site_pal <- solarized_pal()(length(sites)) |> set_names(sites)
+```
+
+# Caregiver survey analysis
+
+## Data preparation
+
+Filter to caregiver measurement items and deduplicate: keep each caregiver's
+earliest survey session, then take one response per item within that session.
+
+```{r}
+#| label: caregiver-setup
+caregiver_raw <- surveys |>
+  filter(survey_type == "caregiver",
+         question_type == "Measurement",
+         !is.na(form_construct),
+         !is.na(value)) |>
+  mutate(site = team) |>
+  filter(site %in% sites) |>
+  group_by(site, child_id) |>
+  filter(survey_timestamp == min(survey_timestamp)) |>   # earliest session per caregiver
+  ungroup() |>
+  group_by(site, child_id, form_construct, variable) |>
+  slice(1) |>   # one response per item (handles exact timestamp ties)
+  ungroup()
+```
+
+## Parenting
+
+The Parenting scale covers three subconstructs: **Warmth** (5 items),
+**Control** (5 items), and **Stress** (4 items), all on a 5-point scale (0–4).
+We use EFA to examine whether the theoretical factor structure is recovered
+empirically across sites.
+
+### Data selection
+
+Extract item-to-subconstruct metadata, then reshape to wide format keeping
+only complete cases.
+
+```{r}
+#| label: pt-setup
+# item metadata: variable → subconstruct mapping
+pt_meta <- caregiver_raw |>
+  filter(form_construct == "Parenting") |>
+  distinct(variable, subconstruct = form_subconstruct)
+
+pt_items      <- pt_meta |> pull(variable)
+item_order_pt <- pt_meta |> arrange(subconstruct) |> pull(variable)
+
+pt <- caregiver_raw |>
+  filter(form_construct == "Parenting") |>
+  select(site, child_id, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value) |>
+  filter(complete.cases(across(all_of(pt_items))))   # factanal() requires no missing values
+```
+
+### Response option distribution
+
+With five response categories, these Likert-type items are conventionally
+treated as continuous (interval-level) rather than ordinal in the factor
+analysis below. This approximation is generally considered acceptable once a
+scale has five or more categories and responses are not severely skewed
+(Rhemtulla et al., 2012), which motivates the maximum-likelihood approach
+(`factanal()`) used here rather than a polychoric-based alternative.
+
+```{r}
+#| label: pt-response-dist
+#| fig-width: 11
+#| fig-height: 5
+pt |>
+  pivot_longer(all_of(pt_items), names_to = "variable", values_to = "value") |>
+  count(site, variable, value) |>
+  group_by(site, variable) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup() |>
+  mutate(variable = factor(variable, levels = rev(item_order_pt))) |>
+  ggplot(aes(x = prop, y = variable, fill = factor(value))) +
+  geom_col() +
+  facet_wrap(~ site, nrow = 1) +
+  scale_fill_viridis_d(name = "Response", option = "mako", direction = -1) +
+  labs(x = "Proportion", y = NULL) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+### Standardization
+
+Z-score all items pooled across sites so loadings are on a common scale.
+
+
+```{r}
+#| label: pt-scale
+pt_scaled <- pt |>
+  mutate(across(all_of(pt_items), \(x) as.numeric(scale(x))))
+```
+
+### Parallel analysis
+
+Run parallel analysis separately for each site. Compare observed factor
+eigenvalues against eigenvalues from random data of the same size — factors
+above the simulated line are retained.
+
+```{r}
+#| label: pt-parallel
+par_results_pt <- list()
+scree_data_pt  <- list()
+
+for (sitei in sites) {
+  pt_site <- pt_scaled |>
+    filter(site == sitei) |>
+    select(all_of(pt_items))
+
+  res <- fa.parallel(pt_site, fa = "fa", n.iter = 100, plot = FALSE)
+  par_results_pt[[sitei]] <- res
+
+  ncomp <- length(res$fa.values)
+  scree_data_pt[[sitei]] <- tibble(
+    site       = sitei,
+    factor     = rep(1:ncomp, 2),
+    eigenvalue = c(res$fa.values, res$fa.sim),
+    type       = rep(c("Observed", "Simulated (mean)"), each = ncomp)
+  )
+}
+
+# compare with the scree plot below to confirm
+nfactors_pt <- sapply(par_results_pt, \(r) r$nfact)
+print(nfactors_pt)
+```
+
+The scree plot below shows observed eigenvalues (solid blue) versus simulated
+eigenvalues from random data (dashed red). The parallel analysis criterion retains
+factors where the observed line is above the simulated line. Use this plot
+together with the algorithmic suggestion above to decide on the final factor count.
+
+```{r}
+#| label: pt-scree
+#| fig-width: 10
+#| fig-height: 4
+bind_rows(scree_data_pt) |>
+  ggplot(aes(x = factor, y = eigenvalue, color = type, linetype = type)) +
+  geom_line() +
+  geom_point(aes(shape = type)) +
+  facet_wrap(~ site, nrow = 1) +
+  scale_color_manual(values = c("Observed" = "#268bd2", "Simulated (mean)" = "#dc322f")) +
+  scale_linetype_manual(values = c("Observed" = "solid", "Simulated (mean)" = "dashed")) +
+  scale_shape_manual(values = c("Observed" = 16, "Simulated (mean)" = 1)) +
+  labs(x = "Factor", y = "Eigenvalue", color = NULL, linetype = NULL, shape = NULL) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+Parallel analysis consistently suggests 3 factors across all three sites,
+consistent with the scale's 3 theoretical subconstructs (Warmth, Control, Stress).
+The scree elbow at factor 3 further corroborates this choice.
+
+### Exploratory factor analysis
+
+We fit EFA with **promax rotation** (oblique — factors are allowed to correlate).
+Promax is preferred over varimax (orthogonal) here because Warmth, Control, and
+Stress are theoretically related and forcing them to be uncorrelated would be
+unrealistic.
+
+
+Only the highest loading per item is displayed; others are zeroed out.
+This works cleanly here because all reverse-scored items in levante survey data 
+have already been recoded so all loadings are expected to be positive.
+
+```{r}
+#| label: pt-efa
+#| fig-width: 12
+#| fig-height: 6
+plot_list_pt <- list()
+
+for (sitei in sites) {
+  pt_site <- pt_scaled |>
+    filter(site == sitei) |>
+    select(all_of(pt_items))
+
+  if (nrow(pt_site) < 20) next
+
+  efa_res <- factanal(
+    ~ ., data = pt_site,
+    factors  = nfactors_pt[sitei],
+    rotation = "promax",
+    na.action = na.exclude
+  )
+
+  # unclass() strips the special "loadings" class so it can be coerced to a data frame
+  load_df <- as.data.frame(unclass(efa_res$loadings)) |>
+    rownames_to_column("variable") |>
+    pivot_longer(-variable, names_to = "factor", values_to = "loading") |>
+    mutate(factor = gsub("Factor", "F", factor)) |>
+    group_by(variable) |>
+    mutate(loading = if_else(loading == max(loading), loading, 0)) |>
+    ungroup() |>
+    left_join(pt_meta, by = "variable") |>
+    mutate(variable = factor(variable, levels = rev(item_order_pt)))
+
+  sub_df  <- distinct(load_df, variable, subconstruct)
+  is_last <- sitei == tail(sites, 1)
+
+  p <- ggplot(load_df, aes(x = factor, y = variable, fill = loading)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = if_else(loading != 0, sprintf("%.2f", loading), "")),
+              size = 3) +
+    scale_fill_gradient2(low = "#2c7bb6", high = "#d7191c", mid = "white",
+                         midpoint = 0, name = "Loading") +
+    theme_classic() +
+    labs(x = NULL, y = "Item", title = sitei) +
+    theme(legend.position = "none")
+
+  if (is_last) {
+    # add subconstruct labels on the right of the last panel only
+    p <- p +
+      geom_text(data = sub_df,
+                aes(x = Inf, y = variable, label = subconstruct),
+                inherit.aes = FALSE, hjust = -0.05, size = 3) +
+      coord_cartesian(clip = "off") +
+      theme(plot.margin = margin(r = 120))
+  } else if (sitei != sites[1]) {
+    p <- p +
+      coord_cartesian(clip = "off") +
+      theme(axis.text.y = element_blank(), axis.title.y = element_blank(),
+            plot.margin = margin(r = 10))
+  } else {
+    p <- p + coord_cartesian(clip = "off") + theme(plot.margin = margin(r = 10))
+  }
+
+  plot_list_pt[[sitei]] <- p
+}
+
+wrap_plots(plot_list_pt, nrow = 1) +
+  plot_annotation(
+    title = "Parenting EFA",
+    theme = theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+  )
+```
+
+# Child survey analysis
+
+EFA is an exploratory tool: it tells us whether a factor structure exists in
+the data. Once we have a theoretically motivated structure — either from EFA
+results or prior literature — we can use **Confirmatory Factor Analysis
+(CFA)**, which tests whether a pre-specified structure fits the data.
+
+When data come from multiple sites or groups, CFA also lets us ask a further
+question: does the scale measure the same construct in the same way across
+groups? This is **measurement invariance testing**, and it is the focus of
+the rest of this tutorial.
+
+We demonstrate the full pipeline on two child survey constructs: **Belonging**,
+**Peer Relationship**.
+
+```{r}
+#| label: child-setup
+library(lavaan)
+
+# load all child measurement items once; filter per construct below
+child_raw <- surveys |>
+  filter(survey_type == "child",
+         question_type == "Measurement",
+         !is.na(value)) |>
+  mutate(site = team) |>
+  filter(site %in% sites) |>
+  group_by(site, child_id) |>
+  filter(survey_timestamp == min(survey_timestamp)) |>
+  ungroup() |>
+  group_by(site, child_id, variable) |>
+  slice(1) |>
+  ungroup()
+```
+
+For all three constructs we follow the same sequence:
+
+1. Check response distributions — WLSMV requires all response categories to
+   appear in every site (empty cells prevent polychoric correlation estimation).
+2. Fit the **configural** model — all parameters free per site.
+3. Fit the **metric** model — loadings constrained equal; compute ΔCFI vs. configural.
+4. Fit the **scalar** model — thresholds also constrained equal; compute ΔCFI vs. metric.
+5. Visualise final parameter estimates as a heatmap.
+
+The identification strategy throughout: fix factor variance to 1 (`F ~~ 1*F`)
+and free all loadings (`NA*` on the first item).
+
+---
+
+## Belonging
+
+Belonging (3 items, 4-point scale 0–3) asks children how connected and happy
+they feel at school.
+
+Filter and reshape the data to wide format with one row per child.
+
+```{r}
+#| label: bl-prep
+bl <- child_raw |>
+  filter(form_construct == "Belonging") |>
+  select(site, child_id, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value)
+
+bl_items <- setdiff(names(bl), c("site", "child_id"))
+bl <- bl |> filter(complete.cases(across(all_of(bl_items))))
+```
+
+WLSMV requires every response category to appear in every site. Check that no category is completely absent for any item.
+
+```{r}
+#| label: bl-response-dist
+#| fig-width: 9
+#| fig-height: 3
+child_raw |>
+  filter(form_construct == "Belonging") |>
+  count(site, variable, value) |>
+  group_by(site, variable) |>
+  mutate(percent = n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = factor(value), y = percent, fill = site)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ variable, nrow = 1) +
+  scale_fill_manual(values = site_pal) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(x = "Response", y = "Proportion", title = "Belonging") +
+  theme_classic() + theme(legend.position = "bottom")
+```
+
+Specify the one-factor model in lavaan syntax. `NA*` on the first item tells lavaan to estimate that loading freely. `BL ~~ 1*BL` fixes the factor variance to 1, which is required to give the model a scale.
+
+```{r}
+#| label: bl-model
+model_bl <- '
+  BL =~ NA*SchoolEnjoy + SchoolFun + SchoolHappy
+  BL ~~ 1*BL
+'
+```
+
+Fit the **configural model** — the same factor structure in all sites, but every loading and threshold is estimated separately per site. This is the unconstrained baseline; all subsequent models are compared against it.
+
+```{r}
+#| label: bl-configural
+#| warning: false
+fit_configural_bl <- cfa(model_bl, data = bl, group = "site",
+                         estimator = "WLSMV", ordered = bl_items)
+fitMeasures(fit_configural_bl, c("cfi", "tli", "rmsea", "srmr"))
+```
+
+Add loading equality constraints across sites (**metric model**). A positive ΔCFI > .01 would mean the items do not relate to the factor with equal strength in every site.
+
+```{r}
+#| label: bl-metric
+#| warning: false
+fit_metric_bl <- cfa(model_bl, data = bl, group = "site",
+                     group.equal = "loadings",
+                     estimator = "WLSMV", ordered = bl_items)
+fitMeasures(fit_metric_bl, c("cfi", "tli", "rmsea", "srmr"))
+
+# positive = CFI dropped (worse fit)
+fitMeasures(fit_configural_bl, "cfi") - fitMeasures(fit_metric_bl, "cfi")
+```
+
+Add threshold equality constraints on top of the metric model (**scalar model**). A positive ΔCFI > .01 would mean children in different sites use the response scale differently for the same level of the latent trait.
+
+```{r}
+#| label: bl-scalar
+#| warning: false
+fit_scalar_bl <- cfa(model_bl, data = bl, group = "site",
+                     group.equal = c("loadings", "thresholds"),
+                     estimator = "WLSMV", ordered = bl_items)
+fitMeasures(fit_scalar_bl, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_bl, "cfi") - fitMeasures(fit_scalar_bl, "cfi")
+```
+
+Full metric and scalar invariance hold (ΔCFI ≤ .01 at both steps).
+`fit_scalar_bl` is the final model.
+
+Print the full model summary — parameter estimates for all loadings and thresholds across sites.
+
+```{r}
+#| label: bl-summary
+summary(fit_scalar_bl)
+```
+
+Visualise loadings (λ) and thresholds (τ) as a heatmap. Each column is a parameter type; each row is an item. When the scale is fully invariant, values in each row should be nearly identical across sites.
+
+```{r}
+#| label: bl-params
+#| fig-width: 8
+#| fig-height: 3
+pe_bl <- parameterEstimates(fit_scalar_bl)
+gl_bl <- lavInspect(fit_scalar_bl, "group.label")
+
+params_bl <- bind_rows(
+  pe_bl |> filter(op == "=~") |>
+    transmute(site  = factor(group, labels = gl_bl),
+              item  = rhs, value = est, param = "lambda"),
+  pe_bl |> filter(op == "|") |>
+    transmute(site  = factor(group, labels = gl_bl),
+              item  = lhs, value = est,
+              param = paste0("tau", gsub("t", "", rhs)))
+)
+
+ggplot(params_bl, aes(param, item, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 3.5) +
+  scale_fill_gradient2(low = "#2c7bb6", mid = "white",
+                       high = "#d7191c", midpoint = 0, name = "Estimate") +
+  scale_x_discrete(limits = c("lambda", "tau1", "tau2", "tau3"),
+                   labels = c(lambda = expression(lambda),
+                              tau1   = expression(tau[1]),
+                              tau2   = expression(tau[2]),
+                              tau3   = expression(tau[3]))) +
+  facet_wrap(~ site, nrow = 1) +
+  theme_classic() +
+  labs(x = NULL, y = "Item")
+```
+
+---
+
+## Peer Relationship
+
+Peer Relationship captures the quality of children's friendships and social
+interactions with classmates.
+
+Filter and reshape the Peer Relationships data to wide format with one row per child.
+
+```{r}
+#| label: pr-prep
+pr <- child_raw |>
+  filter(form_construct == "Peer Relationships") |>
+  select(site, child_id, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value)
+
+pr_items <- setdiff(names(pr), c("site", "child_id"))
+pr <- pr |> filter(complete.cases(across(all_of(pr_items))))
+```
+
+Check the response distribution for each item across sites. Look for floor or ceiling effects before modelling.
+
+```{r}
+#| label: pr-response-dist
+#| fig-width: 9
+#| fig-height: 3
+child_raw |>
+  filter(form_construct == "Peer Relationships") |>
+  count(site, variable, value) |>
+  group_by(site, variable) |>
+  mutate(percent = n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = factor(value), y = percent, fill = site)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ variable, nrow = 1) +
+  scale_fill_manual(values = site_pal) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(x = "Response", y = "Proportion", title = "Peer Relationship") +
+  theme_classic() + theme(legend.position = "bottom")
+```
+
+Define the one-factor CFA model. Item names come directly from the data — no hardcoding needed.
+
+```{r}
+#| label: pr-model
+model_pr <- paste0(
+  "PR =~ NA*", pr_items[1], " + ", paste(pr_items[-1], collapse = " + "), "\n",
+  "PR ~~ 1*PR"
+)
+cat(model_pr)
+```
+
+Fit the **configural model**: the same factor structure is imposed in each site, but all parameters are estimated freely per site.
+
+```{r}
+#| label: pr-configural
+#| warning: false
+fit_configural_pr <- cfa(model_pr, data = pr, group = "site",
+                         estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_configural_pr, c("cfi", "tli", "rmsea", "srmr"))
+```
+
+Add loading equality constraints across sites (**metric model**). A positive ΔCFI > .01 indicates non-invariant loadings.
+
+```{r}
+#| label: pr-metric
+#| warning: false
+fit_metric_pr <- cfa(model_pr, data = pr, group = "site",
+                     group.equal = "loadings",
+                     estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_metric_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+# positive = CFI dropped
+fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_pr, "cfi")
+```
+
+The score test ranks loadings by how much they worsen fit when constrained. The item in the top row is the one to free.
+
+```{r}
+#| label: pr-metric-score
+#| warning: false
+pt_pr <- parTable(fit_metric_pr) |> filter(op == "=~")
+
+lavTestScore(fit_metric_pr)$uni |>
+  mutate(item = pt_pr$rhs[match(lhs, pt_pr$label)]) |>
+  filter(!is.na(item)) |>
+  arrange(desc(X2))
+```
+
+Free the most non-invariant loading and refit (**partial metric model**).
+
+```{r}
+#| label: pr-metric-partial
+#| warning: false
+fit_metric_partial_pr <- cfa(model_pr, data = pr, group = "site",
+                             group.equal = "loadings",
+                             group.partial = "PR=~LonelySchool",
+                             estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_metric_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_partial_pr, "cfi")
+```
+
+Add threshold equality constraints on top of the partial metric model (**scalar model**). ΔCFI > .01 means thresholds are also non-invariant.
+
+```{r}
+#| label: pr-scalar
+#| warning: false
+fit_scalar_pr <- cfa(model_pr, data = pr, group = "site",
+                     group.equal = c("loadings", "thresholds"),
+                     group.partial = "PR=~LonelySchool",
+                     estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_pr, "cfi")
+```
+
+Score test on the scalar model to identify the most non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score
+#| warning: false
+pt_sc_pr <- parTable(fit_scalar_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_pr)$uni |>
+  mutate(gp_str = pt_sc_pr$gp_str[match(lhs, pt_sc_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the top non-invariant threshold (first partial scalar correction).
+
+```{r}
+#| label: pr-scalar-partial
+#| warning: false
+fit_scalar_partial_pr <- cfa(model_pr, data = pr, group = "site",
+                             group.equal = c("loadings", "thresholds"),
+                             group.partial = c("PR=~LonelySchool", "ClassNice | t3"),
+                             estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial_pr, "cfi")
+```
+
+ΔCFI is still > .01 — run the score test again on the partially corrected model to find the next non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score-2
+#| warning: false
+pt_sc2_pr <- parTable(fit_scalar_partial_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_partial_pr)$uni |>
+  mutate(gp_str = pt_sc2_pr$gp_str[match(lhs, pt_sc2_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the second non-invariant threshold. 
+
+```{r}
+#| label: pr-scalar-partial-2
+#| warning: false
+fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "site",
+                              group.equal = c("loadings", "thresholds"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3"),
+                              estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial2_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial2_pr, "cfi")
+```
+
+ΔCFI is still > .01 — run the score test one more time to find the third non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score-3
+#| warning: false
+pt_sc3_pr <- parTable(fit_scalar_partial2_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_partial2_pr)$uni |>
+  mutate(gp_str = pt_sc3_pr$gp_str[match(lhs, pt_sc3_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the third non-invariant threshold. This is the **final partial scalar model**.
+
+```{r}
+#| label: pr-scalar-partial-3
+#| warning: false
+fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "site",
+                              group.equal = c("loadings", "thresholds"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3", "ClassPlay | t3"),
+                              estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial3_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial3_pr, "cfi")
+```
+
+Print the full summary of the final model.
+
+```{r}
+#| label: pr-summary
+summary(fit_scalar_partial3_pr)
+```
+
+Plot loadings (λ) and thresholds (τ) as a heatmap to compare estimates across sites.
+
+```{r}
+#| label: pr-params
+#| fig-width: 8
+#| fig-height: 3
+pe_pr <- parameterEstimates(fit_scalar_partial3_pr)
+gl_pr <- lavInspect(fit_scalar_partial3_pr, "group.label")
+
+params_pr <- bind_rows(
+  pe_pr |> filter(op == "=~") |>
+    transmute(site  = factor(group, labels = gl_pr),
+              item  = rhs, value = est, param = "lambda"),
+  pe_pr |> filter(op == "|") |>
+    transmute(site  = factor(group, labels = gl_pr),
+              item  = lhs, value = est,
+              param = paste0("tau", gsub("t", "", rhs)))
+)
+
+ggplot(params_pr, aes(param, item, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 3.5) +
+  scale_fill_gradient2(low = "#2c7bb6", mid = "white",
+                       high = "#d7191c", midpoint = 0, name = "Estimate") +
+  scale_x_discrete(limits = c("lambda", "tau1", "tau2", "tau3"),
+                   labels = c(lambda = expression(lambda),
+                              tau1   = expression(tau[1]),
+                              tau2   = expression(tau[2]),
+                              tau3   = expression(tau[3]))) +
+  facet_wrap(~ site, nrow = 1) +
+  theme_classic() +
+  labs(x = NULL, y = "Item")
+```
