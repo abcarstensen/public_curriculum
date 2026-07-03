@@ -1,0 +1,136 @@
+---
+title: "SEM Tutorial"
+format: pdf
+---
+
+This tutorial will give you a guided example of using CFA to test between different possible structures underlying a set of data. 
+We use the Executive Function data from the LEVANTE Caregiver Survey - Child, aiming to determine how many factors best describe these data.
+
+```{r}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(pak, lavaan, tidySEM, tidyverse)
+pak::pak("levante-framework/levante-r")
+library(levante)
+```
+
+First, we download the data from the LEVANTE Redivis, and filter down to just the Executive Function (EF) construct.
+```{r}
+df_surveys <- get_surveys(data_source = "levante-data-pilots-hackathon",
+                       version = "current")
+df_surveys_ef <- df_surveys |> 
+  filter(form_construct == "Executive Function")
+```
+
+Let's have a quick look at the questions in this construct.
+```{r}
+df_surveys_ef |> 
+  select(form_subconstruct, variable, item_text) |> 
+  distinct() |> 
+  arrange(form_subconstruct, variable)
+```
+
+There are six subconstructs here, each of which has 5 or 6 items: 
+1. Attentional focus, engagement, & persistence
+2. Inhibitory control: Interference suppression
+3. Inhibitory control: Response inhibition
+4. Working memory
+5. Cognitive flexibility
+6. Planning and organisation
+
+To conduct our CFA, we'll use the package `lavaan`, which expects one row per survey and one column per variable.
+We will reshape our data into this wide format.
+```{r}
+df_surveys_ef_wide <- df_surveys_ef |> 
+  select(survey_id, value, variable) |> 
+  pivot_wider(names_from = "variable",
+              values_from = "value")
+```
+
+
+We're going to do a CFA to determine whether these six subconstructs are the best structure of these variables. 
+We'll compare the following three hypothesised models:
+H1: Common factor model (all EF items load onto the same factor)
+H2: 3-factor model (inhibition, working memory and attention, cognitive flexibility and planning)
+H3: 6-factor model (each subconstruct is its own distinct factor)
+
+Let's write out the model syntax for these hypothesised models.
+`lavaan` uses the operator `=~` to indicate a factor relationship.
+
+```{r}
+h1_mod <- "
+common_ef =~ ChildEFQ1 + ChildEFQ2 + ChildEFQ3 + ChildEFQ4 + ChildEFQ5 + ChildEFQ6 +        # attention
+             ChildEFQ7 + ChildEFQ8 + ChildEFQ9 + ChildEFQ10 + ChildEFQ11 +                  # inhib - int supp
+             ChildEFQ12 + ChildEFQ13 + ChildEFQ14 + ChildEFQ15 + ChildEFQ16 +               # inhib - resp inhib
+             ChildEFQ17 + ChildEFQ18 + ChildEFQ19 + ChildEFQ20 + ChildEFQ21 + ChildEFQ22 +  # wm
+             ChildEFQ23 + ChildEFQ24 + ChildEFQ25 + ChildEFQ26 + ChildEFQ27 + ChildEFQ28 +  # cog flex
+             ChildEFQ29 + ChildEFQ30 + ChildEFQ31 + ChildEFQ32 + ChildEFQ33 + ChildEFQ34    # planning
+"
+
+h2_mod <- "
+inhibition    =~ ChildEFQ7 + ChildEFQ8 + ChildEFQ9 + ChildEFQ10 + ChildEFQ11 +                  # inhib - int supp
+                 ChildEFQ12 + ChildEFQ13 + ChildEFQ14 + ChildEFQ15 + ChildEFQ16                 # inhib - resp inhib
+              
+wm_attention  =~ ChildEFQ1 + ChildEFQ2 + ChildEFQ3 + ChildEFQ4 + ChildEFQ5 + ChildEFQ6 +        # attention
+                 ChildEFQ17 + ChildEFQ18 + ChildEFQ19 + ChildEFQ20 + ChildEFQ21 + ChildEFQ22    # wm
+                
+flex_planning =~ ChildEFQ23 + ChildEFQ24 + ChildEFQ25 + ChildEFQ26 + ChildEFQ27 + ChildEFQ28 +  # cog flex
+                 ChildEFQ29 + ChildEFQ30 + ChildEFQ31 + ChildEFQ32 + ChildEFQ33 + ChildEFQ34    # planning
+"
+
+h3_mod <- "
+attention =~ ChildEFQ1 + ChildEFQ2 + ChildEFQ3 + ChildEFQ4 + ChildEFQ5 + ChildEFQ6          # attention
+inhib_is  =~ ChildEFQ7 + ChildEFQ8 + ChildEFQ9 + ChildEFQ10 + ChildEFQ11                    # inhib - int supp
+inhib_ri  =~ ChildEFQ12 + ChildEFQ13 + ChildEFQ14 + ChildEFQ15 + ChildEFQ16                 # inhib - resp inhib
+wm        =~ ChildEFQ17 + ChildEFQ18 + ChildEFQ19 + ChildEFQ20 + ChildEFQ21 + ChildEFQ22    # wm
+cog_flex  =~ ChildEFQ23 + ChildEFQ24 + ChildEFQ25 + ChildEFQ26 + ChildEFQ27 + ChildEFQ28    # cog flex
+planning  =~ ChildEFQ29 + ChildEFQ30 + ChildEFQ31 + ChildEFQ32 + ChildEFQ33 + ChildEFQ34    # planning
+"
+```
+
+Now let's fit these models, using the `lavaan::cfa()` function.
+Note that there are missing data (not all caregivers filled in all items), so we ask `lavaan` to handle it using the `missing = "ML"` argument (case-wise maximum likelihood estimation).
+```{r}
+h1_cfa <- cfa(h1_mod, df_surveys_ef_wide, missing = "ML")
+h2_cfa <- cfa(h2_mod, df_surveys_ef_wide, missing = "ML")
+h3_cfa <- cfa(h3_mod, df_surveys_ef_wide, missing = "ML")
+```
+
+Now we can look at the fit measures of each model; we've chosen a few for illustration purposes but `lavaan` supports many more.
+```{r}
+# this function takes a while to compute
+mod_fit <- map2(list(h1_cfa, h2_cfa, h3_cfa),
+                c("H1", "H2", "H3"),
+                \(f, n) fitmeasures(f, fit.measures = c("chisq", "cfi.robust", "bic", 
+                                                        "rmsea", "rmsea.ci.lower", "rmsea.ci.upper")) |> 
+                  as_tibble(rownames = "fit") |> 
+                  mutate(model = n)) |> 
+  list_rbind() |> 
+  pivot_wider(names_from = "fit", values_from = "value")
+mod_fit
+```
+
+Across all measures, the models with more factors appear to fit the data better (although the RMSEA values have overlapping confidence intervals).
+Because these models are nested, we can also do a chi-square test to statistically compare them.
+```{r}
+anova(h1_cfa, h2_cfa, h3_cfa)
+```
+Recall that smaller chi-square is better; thus, in this case, our H3 model is significantly better than both H1 and H2.
+
+Overall, these results confirm that a 6-factor structure of EF is better than a 1-factor or 3-factor structure!
+
+We can also plot the factor loadings for our best model.
+I've done a little bit of pre-cleaning to make the plot more legible, although the sheer number of items makes it quite challenging to read anyway.
+Popping the diagram out in another window might help.
+```{r}
+graph_nodes <- get_nodes(h3_cfa) |> 
+  mutate(label = str_remove(label, "ChildEF"))
+graph_edges <- get_edges(h3_cfa) |> 
+  mutate(show = !str_detect(label_results, "Variances."))
+graph_sem(h3_cfa, nodes = graph_nodes, edges = graph_edges, text_size = 2)
+```
+
+We should also have a look at the actual factor scores, which we can do by printing the summary of the model.
+```{r}
+summary(h3_cfa)
+```
+Note that the factor loadings are all pretty close to 1 (anchor), and relatively even across items, suggesting that the different items all contribute similarly to each factor. Neat!
