@@ -1,0 +1,102 @@
+---
+title: "levante-r-tutorial"
+output: html_document
+date: "2026-07-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+See the [levante R package README](https://levante-framework.github.io/levante-r/index.html). This tutorial is adapted from the walkthrough available at this link.
+
+Access to the `levante-data-pilots-hackathon` dataset for this tutorial requires creating a Redivis (data-sharing platform) account, joining the LEVANTE organization, and completing a Data Use Agreement. For more information, see our [Researcher Site page on Data Access](https://researcher.levante-network.org/data).
+
+## Setup 
+```{r}
+# install.packages("devtools") # if you need the devtools package, uncomment this line
+devtools::install_github("levante-framework/levante-r")
+
+# load levante and other supporting packages
+library(levante)
+library(dplyr)
+library(ggplot2)
+
+# set a theme
+theme_set(theme_classic())
+```
+
+## Using the `levante` package to load LEVANTE data
+- Each table from Redivis can be read into R as a data frame using a specific `levante` `get_()` function.  
+- Each `get_()` function takes at least two arguments, including a dataset name (required) and version number (defaults to the current version unless otherwise specified).  
+- `get_participants()` is the first `levante` function in this code. When you run it, you'll be prompted to authenticate with a pop-up browser on Redivis. Subsequent `levante` calls to this dataset within the same session should not require additional authentication.  
+
+```{r}
+# Pull participant data from Redivis and save it to a data frame called "participants"
+participants <- get_participants(data_source = "levante-data-pilots-hackathon:fpx0", version = "current") 
+
+# What's in the participants data frame? 
+head(participants)
+
+# Now let's do some preliminary examination of the participants data
+participants |> count(dataset, sort = TRUE) # the public data releases contain multiple datasets stapled together -- how many participants are there from each dataset?
+```
+
+Use `get_scores()` to obtain scored cognitive task data. 
+```{r}
+
+# Pull scored data from Redivis and save it to a data frame called "scores"
+scores <- # complete this line of code to get scores from levante-data-pilots-hackathon
+  
+# What's in the scores data frame?
+head(scores)
+
+# Now let's do some preliminary examination of the scores data
+scores |> count() # complete this line of code code to return the number of scores for each task_id 
+```
+
+```{r}
+# This plot returns scores by age for each task.
+ggplot(scores, aes(x = age, y = score)) +
+  facet_wrap(vars(task_id)) +
+  geom_point()
+```
+
+Use `get_trials()` to access trial-level data.
+```{r}
+
+# Pull trial-level data from Redivis and save it to a data frame called "trials"
+trials <- # complete this line of code to get scores from levante-data-pilots-hackathon
+
+# What's in the trials data frame?
+head(trials)
+
+# Now let's do some preliminary checks on the trials data
+trials |> count() # complete this line of code to return the number of trials per dataset
+
+trials |> count() # complete this line of code to return the number of trials per task_d
+```
+
+Use `get_surveys()` to access item-level survey data.
+```{r}
+
+# Pull survey data from Redivis and save it to a data frame called "surveys"
+surveys <- # complete this line of code to get scores from levante-data-pilots-hackathon
+
+# What's in the surveys data frame?
+head(trials)
+
+# Now let's do some preliminary examination of the trials data
+surveys |> count() # complete this line of code to return the number of surveys per dataset
+```
+
+Use `get_parameters()` to access the IRT item parameters used in LEVANTE scoring.
+```{r}
+
+# Pull up-to-date item parameters from Redivis
+item_parameters <-# complete this line of code to get scores from levante-data-pilots-hackathon
+
+item_parameters |> count() # returns the number of parameters per task_id
+```
+
+Researchers accessing their own LEVANTE data can use `get_raw_data()` to access additional tables within private dataset. `get_raw_data()` is a general function that can pull any table. This function is not covered as a part of this tutorial, which focuses on accessing the public dataset (see documentation linked at the top of this code for more info).
