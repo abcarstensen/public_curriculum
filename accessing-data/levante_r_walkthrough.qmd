@@ -1,12 +1,9 @@
 ---
 title: "levante-r-tutorial"
-output: html_document
+format:
+  html: default
 date: "2026-07-01"
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
 
 See the [levante R package README](https://levante-framework.github.io/levante-r/index.html). This tutorial is adapted from the walkthrough available at this link.
 
