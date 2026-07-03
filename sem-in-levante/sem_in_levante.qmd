@@ -14,12 +14,13 @@ library(ggthemes)
 surveys <- get_surveys(data_source = "levante-data-pilots-hackathon",
                        version = "current")
 
-# sites present in the data, used in plots and subsetting
-sites    <- surveys |> distinct(team) |> pull(team)
-site_pal <- solarized_pal()(length(sites)) |> set_names(sites)
+# teams present in the data, used in plots and subsetting
+teams    <- surveys |> distinct(team) |> pull(team)
+team_pal <- solarized_pal()(length(teams)) |> set_names(teams)
 ```
 
 # Caregiver survey analysis
+
 
 ## Data preparation
 
@@ -33,13 +34,10 @@ caregiver_raw <- surveys |>
          question_type == "Measurement",
          !is.na(form_construct),
          !is.na(value)) |>
-  mutate(site = team) |>
-  filter(site %in% sites) |>
-  group_by(site, child_id) |>
+  group_by(team, child_id) |>
   filter(survey_timestamp == min(survey_timestamp)) |>   # earliest session per caregiver
   ungroup() |>
-  group_by(site, child_id, form_construct, variable) |>
-  slice(1) |>   # one response per item (handles exact timestamp ties)
+  group_by(team, child_id, form_construct, variable) |>
   ungroup()
 ```
 
@@ -67,19 +65,22 @@ item_order_pt <- pt_meta |> arrange(subconstruct) |> pull(variable)
 
 pt <- caregiver_raw |>
   filter(form_construct == "Parenting") |>
-  select(site, child_id, variable, value) |>
+  select(team, child_id, variable, value) |>
   pivot_wider(names_from = variable, values_from = value) |>
   filter(complete.cases(across(all_of(pt_items))))   # factanal() requires no missing values
 ```
 
+Sample size per team: unique children with complete Parenting data.
+
+```{r}
+#| label: pt-sample-size
+pt |>
+  distinct(team, child_id) |>
+  count(team, name = "n_children")
+```
+
 ### Response option distribution
 
-With five response categories, these Likert-type items are conventionally
-treated as continuous (interval-level) rather than ordinal in the factor
-analysis below. This approximation is generally considered acceptable once a
-scale has five or more categories and responses are not severely skewed
-(Rhemtulla et al., 2012), which motivates the maximum-likelihood approach
-(`factanal()`) used here rather than a polychoric-based alternative.
 
 ```{r}
 #| label: pt-response-dist
@@ -87,14 +88,14 @@ scale has five or more categories and responses are not severely skewed
 #| fig-height: 5
 pt |>
   pivot_longer(all_of(pt_items), names_to = "variable", values_to = "value") |>
-  count(site, variable, value) |>
-  group_by(site, variable) |>
+  count(team, variable, value) |>
+  group_by(team, variable) |>
   mutate(prop = n / sum(n)) |>
   ungroup() |>
   mutate(variable = factor(variable, levels = rev(item_order_pt))) |>
   ggplot(aes(x = prop, y = variable, fill = factor(value))) +
   geom_col() +
-  facet_wrap(~ site, nrow = 1) +
+  facet_wrap(~ team, nrow = 1) +
   scale_fill_viridis_d(name = "Response", option = "mako", direction = -1) +
   labs(x = "Proportion", y = NULL) +
   theme_classic() +
@@ -123,17 +124,17 @@ above the simulated line are retained.
 par_results_pt <- list()
 scree_data_pt  <- list()
 
-for (sitei in sites) {
+for (teami in teams) {
   pt_site <- pt_scaled |>
-    filter(site == sitei) |>
+    filter(team == teami) |>
     select(all_of(pt_items))
 
   res <- fa.parallel(pt_site, fa = "fa", n.iter = 100, plot = FALSE)
-  par_results_pt[[sitei]] <- res
+  par_results_pt[[teami]] <- res
 
   ncomp <- length(res$fa.values)
-  scree_data_pt[[sitei]] <- tibble(
-    site       = sitei,
+  scree_data_pt[[teami]] <- tibble(
+    team       = teami,
     factor     = rep(1:ncomp, 2),
     eigenvalue = c(res$fa.values, res$fa.sim),
     type       = rep(c("Observed", "Simulated (mean)"), each = ncomp)
@@ -158,7 +159,7 @@ bind_rows(scree_data_pt) |>
   ggplot(aes(x = factor, y = eigenvalue, color = type, linetype = type)) +
   geom_line() +
   geom_point(aes(shape = type)) +
-  facet_wrap(~ site, nrow = 1) +
+  facet_wrap(~ team, nrow = 1) +
   scale_color_manual(values = c("Observed" = "#268bd2", "Simulated (mean)" = "#dc322f")) +
   scale_linetype_manual(values = c("Observed" = "solid", "Simulated (mean)" = "dashed")) +
   scale_shape_manual(values = c("Observed" = 16, "Simulated (mean)" = 1)) +
@@ -167,9 +168,6 @@ bind_rows(scree_data_pt) |>
   theme(legend.position = "bottom")
 ```
 
-Parallel analysis consistently suggests 3 factors across all three sites,
-consistent with the scale's 3 theoretical subconstructs (Warmth, Control, Stress).
-The scree elbow at factor 3 further corroborates this choice.
 
 ### Exploratory factor analysis
 
@@ -179,29 +177,38 @@ Stress are theoretically related and forcing them to be uncorrelated would be
 unrealistic.
 
 
-Only the highest loading per item is displayed; others are zeroed out.
-This works cleanly here because all reverse-scored items in levante survey data 
-have already been recoded so all loadings are expected to be positive.
+We fit each site's EFA once, then render it two ways: one heatmap keeping
+only each item's highest loading (others zeroed out), and one keeping every
+loading. This works cleanly here because all reverse-scored items in levante
+survey data have already been recoded so all loadings are expected to be
+positive.
 
 ```{r}
-#| label: pt-efa
-#| fig-width: 12
-#| fig-height: 6
-plot_list_pt <- list()
+#| label: pt-efa-fit
+efa_res_pt <- list()
 
-for (sitei in sites) {
+for (teami in teams) {
   pt_site <- pt_scaled |>
-    filter(site == sitei) |>
+    filter(team == teami) |>
     select(all_of(pt_items))
 
-  if (nrow(pt_site) < 20) next
-
-  efa_res <- factanal(
+  efa_res_pt[[teami]] <- factanal(
     ~ ., data = pt_site,
-    factors  = nfactors_pt[sitei],
+    factors  = nfactors_pt[teami],
     rotation = "promax",
     na.action = na.exclude
   )
+}
+```
+
+```{r}
+#| label: pt-efa-max
+#| fig-width: 12
+#| fig-height: 6
+plot_list_pt_max <- list()
+
+for (teami in names(efa_res_pt)) {
+  efa_res <- efa_res_pt[[teami]]
 
   # unclass() strips the special "loadings" class so it can be coerced to a data frame
   load_df <- as.data.frame(unclass(efa_res$loadings)) |>
@@ -215,7 +222,7 @@ for (sitei in sites) {
     mutate(variable = factor(variable, levels = rev(item_order_pt)))
 
   sub_df  <- distinct(load_df, variable, subconstruct)
-  is_last <- sitei == tail(sites, 1)
+  is_last <- teami == tail(names(efa_res_pt), 1)
 
   p <- ggplot(load_df, aes(x = factor, y = variable, fill = loading)) +
     geom_tile(color = "white") +
@@ -224,7 +231,7 @@ for (sitei in sites) {
     scale_fill_gradient2(low = "#2c7bb6", high = "#d7191c", mid = "white",
                          midpoint = 0, name = "Loading") +
     theme_classic() +
-    labs(x = NULL, y = "Item", title = sitei) +
+    labs(x = NULL, y = "Item", title = teami) +
     theme(legend.position = "none")
 
   if (is_last) {
@@ -235,7 +242,7 @@ for (sitei in sites) {
                 inherit.aes = FALSE, hjust = -0.05, size = 3) +
       coord_cartesian(clip = "off") +
       theme(plot.margin = margin(r = 120))
-  } else if (sitei != sites[1]) {
+  } else if (teami != names(efa_res_pt)[1]) {
     p <- p +
       coord_cartesian(clip = "off") +
       theme(axis.text.y = element_blank(), axis.title.y = element_blank(),
@@ -244,12 +251,69 @@ for (sitei in sites) {
     p <- p + coord_cartesian(clip = "off") + theme(plot.margin = margin(r = 10))
   }
 
-  plot_list_pt[[sitei]] <- p
+  plot_list_pt_max[[teami]] <- p
 }
 
-wrap_plots(plot_list_pt, nrow = 1) +
+wrap_plots(plot_list_pt_max, nrow = 1) +
   plot_annotation(
-    title = "Parenting EFA",
+    title = "Parenting EFA (max loading per item)",
+    theme = theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+  )
+```
+
+```{r}
+#| label: pt-efa-all
+#| fig-width: 12
+#| fig-height: 6
+plot_list_pt_all <- list()
+
+for (teami in names(efa_res_pt)) {
+  efa_res <- efa_res_pt[[teami]]
+
+  # unclass() strips the special "loadings" class so it can be coerced to a data frame
+  load_df <- as.data.frame(unclass(efa_res$loadings)) |>
+    rownames_to_column("variable") |>
+    pivot_longer(-variable, names_to = "factor", values_to = "loading") |>
+    mutate(factor = gsub("Factor", "F", factor)) |>
+    left_join(pt_meta, by = "variable") |>
+    mutate(variable = factor(variable, levels = rev(item_order_pt)))
+
+  sub_df  <- distinct(load_df, variable, subconstruct)
+  is_last <- teami == tail(names(efa_res_pt), 1)
+
+  p <- ggplot(load_df, aes(x = factor, y = variable, fill = loading)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = if_else(loading != 0, sprintf("%.2f", loading), "")),
+              size = 3) +
+    scale_fill_gradient2(low = "#2c7bb6", high = "#d7191c", mid = "white",
+                         midpoint = 0, name = "Loading") +
+    theme_classic() +
+    labs(x = NULL, y = "Item", title = teami) +
+    theme(legend.position = "none")
+
+  if (is_last) {
+    # add subconstruct labels on the right of the last panel only
+    p <- p +
+      geom_text(data = sub_df,
+                aes(x = Inf, y = variable, label = subconstruct),
+                inherit.aes = FALSE, hjust = -0.05, size = 3) +
+      coord_cartesian(clip = "off") +
+      theme(plot.margin = margin(r = 120))
+  } else if (teami != names(efa_res_pt)[1]) {
+    p <- p +
+      coord_cartesian(clip = "off") +
+      theme(axis.text.y = element_blank(), axis.title.y = element_blank(),
+            plot.margin = margin(r = 10))
+  } else {
+    p <- p + coord_cartesian(clip = "off") + theme(plot.margin = margin(r = 10))
+  }
+
+  plot_list_pt_all[[teami]] <- p
+}
+
+wrap_plots(plot_list_pt_all, nrow = 1) +
+  plot_annotation(
+    title = "Parenting EFA (all loadings)",
     theme = theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
   )
 ```
@@ -278,13 +342,10 @@ child_raw <- surveys |>
   filter(survey_type == "child",
          question_type == "Measurement",
          !is.na(value)) |>
-  mutate(site = team) |>
-  filter(site %in% sites) |>
-  group_by(site, child_id) |>
+  group_by(team, child_id) |>
   filter(survey_timestamp == min(survey_timestamp)) |>
   ungroup() |>
-  group_by(site, child_id, variable) |>
-  slice(1) |>
+  group_by(team, child_id, variable) |>
   ungroup()
 ```
 
@@ -313,10 +374,10 @@ Filter and reshape the data to wide format with one row per child.
 #| label: bl-prep
 bl <- child_raw |>
   filter(form_construct == "Belonging") |>
-  select(site, child_id, variable, value) |>
+  select(team, child_id, variable, value) |>
   pivot_wider(names_from = variable, values_from = value)
 
-bl_items <- setdiff(names(bl), c("site", "child_id"))
+bl_items <- setdiff(names(bl), c("team", "child_id"))
 bl <- bl |> filter(complete.cases(across(all_of(bl_items))))
 ```
 
@@ -328,14 +389,14 @@ WLSMV requires every response category to appear in every site. Check that no ca
 #| fig-height: 3
 child_raw |>
   filter(form_construct == "Belonging") |>
-  count(site, variable, value) |>
-  group_by(site, variable) |>
+  count(team, variable, value) |>
+  group_by(team, variable) |>
   mutate(percent = n / sum(n)) |>
   ungroup() |>
-  ggplot(aes(x = factor(value), y = percent, fill = site)) +
+  ggplot(aes(x = factor(value), y = percent, fill = team)) +
   geom_col(position = "dodge") +
   facet_wrap(~ variable, nrow = 1) +
-  scale_fill_manual(values = site_pal) +
+  scale_fill_manual(values = team_pal) +
   scale_y_continuous(labels = scales::label_percent()) +
   labs(x = "Response", y = "Proportion", title = "Belonging") +
   theme_classic() + theme(legend.position = "bottom")
@@ -356,7 +417,7 @@ Fit the **configural model** — the same factor structure in all sites, but eve
 ```{r}
 #| label: bl-configural
 #| warning: false
-fit_configural_bl <- cfa(model_bl, data = bl, group = "site",
+fit_configural_bl <- cfa(model_bl, data = bl, group = "team",
                          estimator = "WLSMV", ordered = bl_items)
 fitMeasures(fit_configural_bl, c("cfi", "tli", "rmsea", "srmr"))
 ```
@@ -366,7 +427,7 @@ Add loading equality constraints across sites (**metric model**). A positive ΔC
 ```{r}
 #| label: bl-metric
 #| warning: false
-fit_metric_bl <- cfa(model_bl, data = bl, group = "site",
+fit_metric_bl <- cfa(model_bl, data = bl, group = "team",
                      group.equal = "loadings",
                      estimator = "WLSMV", ordered = bl_items)
 fitMeasures(fit_metric_bl, c("cfi", "tli", "rmsea", "srmr"))
@@ -380,7 +441,7 @@ Add threshold equality constraints on top of the metric model (**scalar model**)
 ```{r}
 #| label: bl-scalar
 #| warning: false
-fit_scalar_bl <- cfa(model_bl, data = bl, group = "site",
+fit_scalar_bl <- cfa(model_bl, data = bl, group = "team",
                      group.equal = c("loadings", "thresholds"),
                      estimator = "WLSMV", ordered = bl_items)
 fitMeasures(fit_scalar_bl, c("cfi", "tli", "rmsea", "srmr"))
@@ -409,10 +470,10 @@ gl_bl <- lavInspect(fit_scalar_bl, "group.label")
 
 params_bl <- bind_rows(
   pe_bl |> filter(op == "=~") |>
-    transmute(site  = factor(group, labels = gl_bl),
+    transmute(team  = factor(group, labels = gl_bl),
               item  = rhs, value = est, param = "lambda"),
   pe_bl |> filter(op == "|") |>
-    transmute(site  = factor(group, labels = gl_bl),
+    transmute(team  = factor(group, labels = gl_bl),
               item  = lhs, value = est,
               param = paste0("tau", gsub("t", "", rhs)))
 )
@@ -427,7 +488,7 @@ ggplot(params_bl, aes(param, item, fill = value)) +
                               tau1   = expression(tau[1]),
                               tau2   = expression(tau[2]),
                               tau3   = expression(tau[3]))) +
-  facet_wrap(~ site, nrow = 1) +
+  facet_wrap(~ team, nrow = 1) +
   theme_classic() +
   labs(x = NULL, y = "Item")
 ```
@@ -445,10 +506,10 @@ Filter and reshape the Peer Relationships data to wide format with one row per c
 #| label: pr-prep
 pr <- child_raw |>
   filter(form_construct == "Peer Relationships") |>
-  select(site, child_id, variable, value) |>
+  select(team, child_id, variable, value) |>
   pivot_wider(names_from = variable, values_from = value)
 
-pr_items <- setdiff(names(pr), c("site", "child_id"))
+pr_items <- setdiff(names(pr), c("team", "child_id"))
 pr <- pr |> filter(complete.cases(across(all_of(pr_items))))
 ```
 
@@ -460,14 +521,14 @@ Check the response distribution for each item across sites. Look for floor or ce
 #| fig-height: 3
 child_raw |>
   filter(form_construct == "Peer Relationships") |>
-  count(site, variable, value) |>
-  group_by(site, variable) |>
+  count(team, variable, value) |>
+  group_by(team, variable) |>
   mutate(percent = n / sum(n)) |>
   ungroup() |>
-  ggplot(aes(x = factor(value), y = percent, fill = site)) +
+  ggplot(aes(x = factor(value), y = percent, fill = team)) +
   geom_col(position = "dodge") +
   facet_wrap(~ variable, nrow = 1) +
-  scale_fill_manual(values = site_pal) +
+  scale_fill_manual(values = team_pal) +
   scale_y_continuous(labels = scales::label_percent()) +
   labs(x = "Response", y = "Proportion", title = "Peer Relationship") +
   theme_classic() + theme(legend.position = "bottom")
@@ -489,7 +550,7 @@ Fit the **configural model**: the same factor structure is imposed in each site,
 ```{r}
 #| label: pr-configural
 #| warning: false
-fit_configural_pr <- cfa(model_pr, data = pr, group = "site",
+fit_configural_pr <- cfa(model_pr, data = pr, group = "team",
                          estimator = "WLSMV", ordered = pr_items)
 fitMeasures(fit_configural_pr, c("cfi", "tli", "rmsea", "srmr"))
 ```
@@ -499,7 +560,7 @@ Add loading equality constraints across sites (**metric model**). A positive ΔC
 ```{r}
 #| label: pr-metric
 #| warning: false
-fit_metric_pr <- cfa(model_pr, data = pr, group = "site",
+fit_metric_pr <- cfa(model_pr, data = pr, group = "team",
                      group.equal = "loadings",
                      estimator = "WLSMV", ordered = pr_items)
 fitMeasures(fit_metric_pr, c("cfi", "tli", "rmsea", "srmr"))
@@ -526,7 +587,7 @@ Free the most non-invariant loading and refit (**partial metric model**).
 ```{r}
 #| label: pr-metric-partial
 #| warning: false
-fit_metric_partial_pr <- cfa(model_pr, data = pr, group = "site",
+fit_metric_partial_pr <- cfa(model_pr, data = pr, group = "team",
                              group.equal = "loadings",
                              group.partial = "PR=~LonelySchool",
                              estimator = "WLSMV", ordered = pr_items)
@@ -540,7 +601,7 @@ Add threshold equality constraints on top of the partial metric model (**scalar 
 ```{r}
 #| label: pr-scalar
 #| warning: false
-fit_scalar_pr <- cfa(model_pr, data = pr, group = "site",
+fit_scalar_pr <- cfa(model_pr, data = pr, group = "team",
                      group.equal = c("loadings", "thresholds"),
                      group.partial = "PR=~LonelySchool",
                      estimator = "WLSMV", ordered = pr_items)
@@ -569,7 +630,7 @@ Free the top non-invariant threshold (first partial scalar correction).
 ```{r}
 #| label: pr-scalar-partial
 #| warning: false
-fit_scalar_partial_pr <- cfa(model_pr, data = pr, group = "site",
+fit_scalar_partial_pr <- cfa(model_pr, data = pr, group = "team",
                              group.equal = c("loadings", "thresholds"),
                              group.partial = c("PR=~LonelySchool", "ClassNice | t3"),
                              estimator = "WLSMV", ordered = pr_items)
@@ -598,7 +659,7 @@ Free the second non-invariant threshold.
 ```{r}
 #| label: pr-scalar-partial-2
 #| warning: false
-fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "site",
+fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "team",
                               group.equal = c("loadings", "thresholds"),
                               group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3"),
                               estimator = "WLSMV", ordered = pr_items)
@@ -627,7 +688,7 @@ Free the third non-invariant threshold. This is the **final partial scalar model
 ```{r}
 #| label: pr-scalar-partial-3
 #| warning: false
-fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "site",
+fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "team",
                               group.equal = c("loadings", "thresholds"),
                               group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3", "ClassPlay | t3"),
                               estimator = "WLSMV", ordered = pr_items)
@@ -654,10 +715,10 @@ gl_pr <- lavInspect(fit_scalar_partial3_pr, "group.label")
 
 params_pr <- bind_rows(
   pe_pr |> filter(op == "=~") |>
-    transmute(site  = factor(group, labels = gl_pr),
+    transmute(team  = factor(group, labels = gl_pr),
               item  = rhs, value = est, param = "lambda"),
   pe_pr |> filter(op == "|") |>
-    transmute(site  = factor(group, labels = gl_pr),
+    transmute(team  = factor(group, labels = gl_pr),
               item  = lhs, value = est,
               param = paste0("tau", gsub("t", "", rhs)))
 )
@@ -672,7 +733,7 @@ ggplot(params_pr, aes(param, item, fill = value)) +
                               tau1   = expression(tau[1]),
                               tau2   = expression(tau[2]),
                               tau3   = expression(tau[3]))) +
-  facet_wrap(~ site, nrow = 1) +
+  facet_wrap(~ team, nrow = 1) +
   theme_classic() +
   labs(x = NULL, y = "Item")
 ```
