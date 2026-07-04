@@ -549,7 +549,6 @@ Fit the **configural model**: the same factor structure is imposed in each site,
 
 ```{r}
 #| label: pr-configural
-#| warning: false
 fit_configural_pr <- cfa(model_pr, data = pr, group = "team",
                          estimator = "WLSMV", ordered = pr_items)
 fitMeasures(fit_configural_pr, c("cfi", "tli", "rmsea", "srmr"))
@@ -559,7 +558,6 @@ Add loading equality constraints across sites (**metric model**). A positive ΔC
 
 ```{r}
 #| label: pr-metric
-#| warning: false
 fit_metric_pr <- cfa(model_pr, data = pr, group = "team",
                      group.equal = "loadings",
                      estimator = "WLSMV", ordered = pr_items)
@@ -661,7 +659,7 @@ Free the second non-invariant threshold.
 #| warning: false
 fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "team",
                               group.equal = c("loadings", "thresholds"),
-                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3"),
                               estimator = "WLSMV", ordered = pr_items)
 fitMeasures(fit_scalar_partial2_pr, c("cfi", "tli", "rmsea", "srmr"))
 
@@ -690,7 +688,7 @@ Free the third non-invariant threshold. This is the **final partial scalar model
 #| warning: false
 fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "team",
                               group.equal = c("loadings", "thresholds"),
-                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassHelp | t3", "ClassPlay | t3"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3", "ClassHelp | t3"),
                               estimator = "WLSMV", ordered = pr_items)
 fitMeasures(fit_scalar_partial3_pr, c("cfi", "tli", "rmsea", "srmr"))
 
