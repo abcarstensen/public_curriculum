@@ -5,6 +5,9 @@ Load the LEVANTE survey data and define site labels used throughout.
 
 ```{r}
 # https://github.com/levante-framework/levante-r
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(pak, tidyverse, psych, patchwork, ggthemes)
+pak::pak("levante-framework/levante-r")
 library(levante)
 library(psych)      
 library(patchwork)
@@ -129,7 +132,7 @@ for (teami in teams) {
     filter(team == teami) |>
     select(all_of(pt_items))
 
-  res <- fa.parallel(pt_site, fa = "fa", n.iter = 100, plot = FALSE)
+  res <- fa.parallel(pt_site, fa = "fa", n.iter = 100, plot = TRUE)
   par_results_pt[[teami]] <- res
 
   ncomp <- length(res$fa.values)
@@ -335,7 +338,8 @@ We demonstrate the full pipeline on two child survey constructs: **Belonging**,
 
 ```{r}
 #| label: child-setup
-library(lavaan)
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(lavaan)
 
 # load all child measurement items once; filter per construct below
 child_raw <- surveys |>
@@ -363,7 +367,251 @@ and free all loadings (`NA*` on the first item).
 
 ---
 
-## Belonging
+## Peer Relationship
+
+Peer Relationship captures the quality of children's friendships and social
+interactions with classmates.
+
+Filter and reshape the Peer Relationships data to wide format with one row per child.
+
+```{r}
+#| label: pr-prep
+pr <- child_raw |>
+  filter(form_construct == "Peer Relationships") |>
+  select(team, child_id, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value)
+
+pr_items <- setdiff(names(pr), c("team", "child_id"))
+pr <- pr |> filter(complete.cases(across(all_of(pr_items))))
+```
+
+Check the response distribution for each item across sites. Look for floor or ceiling effects before modelling.
+
+```{r}
+#| label: pr-response-dist
+#| fig-width: 9
+#| fig-height: 3
+child_raw |>
+  filter(form_construct == "Peer Relationships") |>
+  count(team, variable, value) |>
+  group_by(team, variable) |>
+  mutate(percent = n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = factor(value), y = percent, fill = team)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ variable, nrow = 1) +
+  scale_fill_manual(values = team_pal) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(x = "Response", y = "Proportion", title = "Peer Relationship") +
+  theme_classic() + theme(legend.position = "bottom")
+```
+
+Define the one-factor CFA model. Item names come directly from the data — no hardcoding needed.
+
+```{r}
+#| label: pr-model
+model_pr <- paste0(
+  "PR =~ NA*", pr_items[1], " + ", paste(pr_items[-1], collapse = " + "), "\n",
+  "PR ~~ 1*PR"
+)
+cat(model_pr)
+```
+
+Fit the **configural model**: the same factor structure is imposed in each site, but all parameters are estimated freely per site.
+
+```{r}
+#| label: pr-configural
+fit_configural_pr <- cfa(model_pr, data = pr, group = "team",
+                         estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_configural_pr, c("cfi", "tli", "rmsea", "srmr"))
+```
+
+Add loading equality constraints across sites (**metric model**). A positive ΔCFI > .01 indicates non-invariant loadings.
+
+```{r}
+#| label: pr-metric
+fit_metric_pr <- cfa(model_pr, data = pr, group = "team",
+                     group.equal = "loadings",
+                     estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_metric_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+# positive = CFI dropped
+fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_pr, "cfi")
+```
+
+The score test ranks loadings by how much they worsen fit when constrained. The item in the top row is the one to free.
+
+```{r}
+#| label: pr-metric-score
+#| warning: false
+pt_pr <- parTable(fit_metric_pr) |> filter(op == "=~")
+
+lavTestScore(fit_metric_pr)$uni |>
+  mutate(item = pt_pr$rhs[match(lhs, pt_pr$label)]) |>
+  filter(!is.na(item)) |>
+  arrange(desc(X2))
+```
+
+Free the most non-invariant loading and refit (**partial metric model**).
+
+```{r}
+#| label: pr-metric-partial
+
+fit_metric_partial_pr <- cfa(model_pr, data = pr, group = "team",
+                             group.equal = "loadings",
+                             group.partial = "PR=~LonelySchool",
+                             estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_metric_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_partial_pr, "cfi")
+```
+
+Add threshold equality constraints on top of the partial metric model (**scalar model**). ΔCFI > .01 means thresholds are also non-invariant.
+
+```{r}
+#| label: pr-scalar
+
+fit_scalar_pr <- cfa(model_pr, data = pr, group = "team",
+                     group.equal = c("loadings", "thresholds"),
+                     group.partial = "PR=~LonelySchool",
+                     estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_pr, "cfi")
+```
+
+Score test on the scalar model to identify the most non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score
+#| warning: false
+pt_sc_pr <- parTable(fit_scalar_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_pr)$uni |>
+  mutate(gp_str = pt_sc_pr$gp_str[match(lhs, pt_sc_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the top non-invariant threshold (first partial scalar correction).
+
+```{r}
+#| label: pr-scalar-partial
+
+fit_scalar_partial_pr <- cfa(model_pr, data = pr, group = "team",
+                             group.equal = c("loadings", "thresholds"),
+                             group.partial = c("PR=~LonelySchool", "ClassNice | t3"),
+                             estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial_pr, "cfi")
+```
+
+ΔCFI is still > .01 — run the score test again on the partially corrected model to find the next non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score-2
+#| warning: false
+pt_sc2_pr <- parTable(fit_scalar_partial_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_partial_pr)$uni |>
+  mutate(gp_str = pt_sc2_pr$gp_str[match(lhs, pt_sc2_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the second non-invariant threshold. 
+
+```{r}
+#| label: pr-scalar-partial-2
+#| warning: false
+fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "team",
+                              group.equal = c("loadings", "thresholds"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3"),
+                              estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial2_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial2_pr, "cfi")
+```
+
+ΔCFI is still > .01 — run the score test one more time to find the third non-invariant threshold.
+
+```{r}
+#| label: pr-scalar-score-3
+#| warning: false
+pt_sc3_pr <- parTable(fit_scalar_partial2_pr) |>
+  filter(op == "|", group == 1) |>
+  mutate(gp_str = paste0(lhs, "|", rhs))
+
+lavTestScore(fit_scalar_partial2_pr)$uni |>
+  mutate(gp_str = pt_sc3_pr$gp_str[match(lhs, pt_sc3_pr$label)]) |>
+  filter(!is.na(gp_str)) |>
+  arrange(desc(X2))
+```
+
+Free the third non-invariant threshold. This is the **final partial scalar model**.
+
+```{r}
+#| label: pr-scalar-partial-3
+
+fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "team",
+                              group.equal = c("loadings", "thresholds"),
+                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3", "ClassHelp | t3"),
+                              estimator = "WLSMV", ordered = pr_items)
+fitMeasures(fit_scalar_partial3_pr, c("cfi", "tli", "rmsea", "srmr"))
+
+fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial3_pr, "cfi")
+```
+
+Print the full summary of the final model.
+
+```{r}
+#| label: pr-summary
+summary(fit_scalar_partial3_pr)
+```
+
+Plot loadings (λ) and thresholds (τ) as a heatmap to compare estimates across sites.
+
+```{r}
+#| label: pr-params
+#| fig-width: 8
+#| fig-height: 3
+pe_pr <- parameterEstimates(fit_scalar_partial3_pr)
+gl_pr <- lavInspect(fit_scalar_partial3_pr, "group.label")
+
+params_pr <- bind_rows(
+  pe_pr |> filter(op == "=~") |>
+    transmute(team  = factor(group, labels = gl_pr),
+              item  = rhs, value = est, param = "lambda"),
+  pe_pr |> filter(op == "|") |>
+    transmute(team  = factor(group, labels = gl_pr),
+              item  = lhs, value = est,
+              param = paste0("tau", gsub("t", "", rhs)))
+)
+
+ggplot(params_pr, aes(param, item, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 3.5) +
+  scale_fill_gradient2(low = "#2c7bb6", mid = "white",
+                       high = "#d7191c", midpoint = 0, name = "Estimate") +
+  scale_x_discrete(limits = c("lambda", "tau1", "tau2", "tau3"),
+                   labels = c(lambda = expression(lambda),
+                              tau1   = expression(tau[1]),
+                              tau2   = expression(tau[2]),
+                              tau3   = expression(tau[3]))) +
+  facet_wrap(~ team, nrow = 1) +
+  theme_classic() +
+  labs(x = NULL, y = "Item")
+```
+
+
+---
+
+## Belonging (Perfect invariance without modification, probably cannot cover this section due to time)
 
 Belonging (3 items, 4-point scale 0–3) asks children how connected and happy
 they feel at school.
@@ -479,249 +727,6 @@ params_bl <- bind_rows(
 )
 
 ggplot(params_bl, aes(param, item, fill = value)) +
-  geom_tile(color = "white") +
-  geom_text(aes(label = sprintf("%.2f", value)), size = 3.5) +
-  scale_fill_gradient2(low = "#2c7bb6", mid = "white",
-                       high = "#d7191c", midpoint = 0, name = "Estimate") +
-  scale_x_discrete(limits = c("lambda", "tau1", "tau2", "tau3"),
-                   labels = c(lambda = expression(lambda),
-                              tau1   = expression(tau[1]),
-                              tau2   = expression(tau[2]),
-                              tau3   = expression(tau[3]))) +
-  facet_wrap(~ team, nrow = 1) +
-  theme_classic() +
-  labs(x = NULL, y = "Item")
-```
-
----
-
-## Peer Relationship
-
-Peer Relationship captures the quality of children's friendships and social
-interactions with classmates.
-
-Filter and reshape the Peer Relationships data to wide format with one row per child.
-
-```{r}
-#| label: pr-prep
-pr <- child_raw |>
-  filter(form_construct == "Peer Relationships") |>
-  select(team, child_id, variable, value) |>
-  pivot_wider(names_from = variable, values_from = value)
-
-pr_items <- setdiff(names(pr), c("team", "child_id"))
-pr <- pr |> filter(complete.cases(across(all_of(pr_items))))
-```
-
-Check the response distribution for each item across sites. Look for floor or ceiling effects before modelling.
-
-```{r}
-#| label: pr-response-dist
-#| fig-width: 9
-#| fig-height: 3
-child_raw |>
-  filter(form_construct == "Peer Relationships") |>
-  count(team, variable, value) |>
-  group_by(team, variable) |>
-  mutate(percent = n / sum(n)) |>
-  ungroup() |>
-  ggplot(aes(x = factor(value), y = percent, fill = team)) +
-  geom_col(position = "dodge") +
-  facet_wrap(~ variable, nrow = 1) +
-  scale_fill_manual(values = team_pal) +
-  scale_y_continuous(labels = scales::label_percent()) +
-  labs(x = "Response", y = "Proportion", title = "Peer Relationship") +
-  theme_classic() + theme(legend.position = "bottom")
-```
-
-Define the one-factor CFA model. Item names come directly from the data — no hardcoding needed.
-
-```{r}
-#| label: pr-model
-model_pr <- paste0(
-  "PR =~ NA*", pr_items[1], " + ", paste(pr_items[-1], collapse = " + "), "\n",
-  "PR ~~ 1*PR"
-)
-cat(model_pr)
-```
-
-Fit the **configural model**: the same factor structure is imposed in each site, but all parameters are estimated freely per site.
-
-```{r}
-#| label: pr-configural
-fit_configural_pr <- cfa(model_pr, data = pr, group = "team",
-                         estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_configural_pr, c("cfi", "tli", "rmsea", "srmr"))
-```
-
-Add loading equality constraints across sites (**metric model**). A positive ΔCFI > .01 indicates non-invariant loadings.
-
-```{r}
-#| label: pr-metric
-fit_metric_pr <- cfa(model_pr, data = pr, group = "team",
-                     group.equal = "loadings",
-                     estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_metric_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-# positive = CFI dropped
-fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_pr, "cfi")
-```
-
-The score test ranks loadings by how much they worsen fit when constrained. The item in the top row is the one to free.
-
-```{r}
-#| label: pr-metric-score
-#| warning: false
-pt_pr <- parTable(fit_metric_pr) |> filter(op == "=~")
-
-lavTestScore(fit_metric_pr)$uni |>
-  mutate(item = pt_pr$rhs[match(lhs, pt_pr$label)]) |>
-  filter(!is.na(item)) |>
-  arrange(desc(X2))
-```
-
-Free the most non-invariant loading and refit (**partial metric model**).
-
-```{r}
-#| label: pr-metric-partial
-#| warning: false
-fit_metric_partial_pr <- cfa(model_pr, data = pr, group = "team",
-                             group.equal = "loadings",
-                             group.partial = "PR=~LonelySchool",
-                             estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_metric_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-fitMeasures(fit_configural_pr, "cfi") - fitMeasures(fit_metric_partial_pr, "cfi")
-```
-
-Add threshold equality constraints on top of the partial metric model (**scalar model**). ΔCFI > .01 means thresholds are also non-invariant.
-
-```{r}
-#| label: pr-scalar
-#| warning: false
-fit_scalar_pr <- cfa(model_pr, data = pr, group = "team",
-                     group.equal = c("loadings", "thresholds"),
-                     group.partial = "PR=~LonelySchool",
-                     estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_scalar_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_pr, "cfi")
-```
-
-Score test on the scalar model to identify the most non-invariant threshold.
-
-```{r}
-#| label: pr-scalar-score
-#| warning: false
-pt_sc_pr <- parTable(fit_scalar_pr) |>
-  filter(op == "|", group == 1) |>
-  mutate(gp_str = paste0(lhs, "|", rhs))
-
-lavTestScore(fit_scalar_pr)$uni |>
-  mutate(gp_str = pt_sc_pr$gp_str[match(lhs, pt_sc_pr$label)]) |>
-  filter(!is.na(gp_str)) |>
-  arrange(desc(X2))
-```
-
-Free the top non-invariant threshold (first partial scalar correction).
-
-```{r}
-#| label: pr-scalar-partial
-#| warning: false
-fit_scalar_partial_pr <- cfa(model_pr, data = pr, group = "team",
-                             group.equal = c("loadings", "thresholds"),
-                             group.partial = c("PR=~LonelySchool", "ClassNice | t3"),
-                             estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_scalar_partial_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial_pr, "cfi")
-```
-
-ΔCFI is still > .01 — run the score test again on the partially corrected model to find the next non-invariant threshold.
-
-```{r}
-#| label: pr-scalar-score-2
-#| warning: false
-pt_sc2_pr <- parTable(fit_scalar_partial_pr) |>
-  filter(op == "|", group == 1) |>
-  mutate(gp_str = paste0(lhs, "|", rhs))
-
-lavTestScore(fit_scalar_partial_pr)$uni |>
-  mutate(gp_str = pt_sc2_pr$gp_str[match(lhs, pt_sc2_pr$label)]) |>
-  filter(!is.na(gp_str)) |>
-  arrange(desc(X2))
-```
-
-Free the second non-invariant threshold. 
-
-```{r}
-#| label: pr-scalar-partial-2
-#| warning: false
-fit_scalar_partial2_pr <- cfa(model_pr, data = pr, group = "team",
-                              group.equal = c("loadings", "thresholds"),
-                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3"),
-                              estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_scalar_partial2_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial2_pr, "cfi")
-```
-
-ΔCFI is still > .01 — run the score test one more time to find the third non-invariant threshold.
-
-```{r}
-#| label: pr-scalar-score-3
-#| warning: false
-pt_sc3_pr <- parTable(fit_scalar_partial2_pr) |>
-  filter(op == "|", group == 1) |>
-  mutate(gp_str = paste0(lhs, "|", rhs))
-
-lavTestScore(fit_scalar_partial2_pr)$uni |>
-  mutate(gp_str = pt_sc3_pr$gp_str[match(lhs, pt_sc3_pr$label)]) |>
-  filter(!is.na(gp_str)) |>
-  arrange(desc(X2))
-```
-
-Free the third non-invariant threshold. This is the **final partial scalar model**.
-
-```{r}
-#| label: pr-scalar-partial-3
-#| warning: false
-fit_scalar_partial3_pr <- cfa(model_pr, data = pr, group = "team",
-                              group.equal = c("loadings", "thresholds"),
-                              group.partial = c("PR=~LonelySchool", "ClassNice | t3", "ClassPlay | t3", "ClassHelp | t3"),
-                              estimator = "WLSMV", ordered = pr_items)
-fitMeasures(fit_scalar_partial3_pr, c("cfi", "tli", "rmsea", "srmr"))
-
-fitMeasures(fit_metric_partial_pr, "cfi") - fitMeasures(fit_scalar_partial3_pr, "cfi")
-```
-
-Print the full summary of the final model.
-
-```{r}
-#| label: pr-summary
-summary(fit_scalar_partial3_pr)
-```
-
-Plot loadings (λ) and thresholds (τ) as a heatmap to compare estimates across sites.
-
-```{r}
-#| label: pr-params
-#| fig-width: 8
-#| fig-height: 3
-pe_pr <- parameterEstimates(fit_scalar_partial3_pr)
-gl_pr <- lavInspect(fit_scalar_partial3_pr, "group.label")
-
-params_pr <- bind_rows(
-  pe_pr |> filter(op == "=~") |>
-    transmute(team  = factor(group, labels = gl_pr),
-              item  = rhs, value = est, param = "lambda"),
-  pe_pr |> filter(op == "|") |>
-    transmute(team  = factor(group, labels = gl_pr),
-              item  = lhs, value = est,
-              param = paste0("tau", gsub("t", "", rhs)))
-)
-
-ggplot(params_pr, aes(param, item, fill = value)) +
   geom_tile(color = "white") +
   geom_text(aes(label = sprintf("%.2f", value)), size = 3.5) +
   scale_fill_gradient2(low = "#2c7bb6", mid = "white",
