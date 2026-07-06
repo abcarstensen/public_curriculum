@@ -14,11 +14,14 @@ library(levante)
 ```
 
 First, we download the data from the LEVANTE Redivis, and filter down to just the Executive Function (EF) construct.
+For the purpose of this tutorial, we're also going to filter down to just the Germany data (so that our models run fast enough); in your own time, feel free to play around to see what it would look like to use other slices of the data.
 ```{r}
 df_surveys <- get_surveys(data_source = "levante-data-pilots-hackathon",
                        version = "current")
 df_surveys_ef <- df_surveys |> 
-  filter(form_construct == "Executive Function")
+  filter(form_construct == "Executive Function",
+         dataset == "pilot_mpieva_de_main")
+rm(df_surveys)
 ```
 
 Let's have a quick look at the questions in this construct.
